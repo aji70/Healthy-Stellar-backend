@@ -9,6 +9,7 @@ import { StellarWithBreakerService } from './services/stellar-with-breaker.servi
 import { StellarTransactionRetryService } from './services/stellar-transaction-retry.service';
 import { StellarTransactionQueueService } from './services/stellar-transaction-queue.service';
 import { StellarRecoveryManagerService } from './services/stellar-recovery-manager.service';
+import { StellarRetryStoreService } from './services/stellar-retry-store.service';
 import { CircuitBreakerModule } from '../common/circuit-breaker/circuit-breaker.module';
 
 @Module({
@@ -27,6 +28,7 @@ import { CircuitBreakerModule } from '../common/circuit-breaker/circuit-breaker.
     StellarService,
     StellarWithBreakerService,
     StellarTransactionRetryService,
+    StellarRetryStoreService,
     StellarTransactionQueueService,
     StellarRecoveryManagerService,
   ],

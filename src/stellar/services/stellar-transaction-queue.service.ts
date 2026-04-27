@@ -5,6 +5,7 @@ import {
   StellarTransactionRetryService,
   TransactionContext,
 } from './stellar-transaction-retry.service';
+import { StellarRetryStoreService } from './stellar-retry-store.service';
 
 /**
  * Stellar Transaction Queue Service
@@ -64,6 +65,7 @@ export class StellarTransactionQueueService implements OnModuleInit {
   constructor(
     private readonly configService: ConfigService,
     private readonly retryService: StellarTransactionRetryService,
+    private readonly retryStore: StellarRetryStoreService,
   ) {
     this.maxQueueSize = parseInt(
       this.configService.get<string>('STELLAR_QUEUE_MAX_SIZE', '1000'),
@@ -83,8 +85,21 @@ export class StellarTransactionQueueService implements OnModuleInit {
     );
   }
 
-  onModuleInit() {
+  async onModuleInit() {
+    await this.loadPersistedQueue();
     this.startRetryScheduler();
+  }
+
+  private async loadPersistedQueue(): Promise<void> {
+    const networkPassphrase = this.configService.get<string>(
+      'STELLAR_NETWORK_PASSPHRASE',
+      StellarSdk.Networks.TESTNET,
+    );
+    const entries = await this.retryStore.loadAll();
+    if (!entries.length) return;
+
+    const imported = this.importQueue(entries, networkPassphrase);
+    this.logger.log(`Restored ${imported} queued transactions from Redis`);
   }
 
   /**
@@ -121,6 +136,9 @@ export class StellarTransactionQueueService implements OnModuleInit {
 
     this.queue.set(id, queuedTx);
 
+    // Persist to Redis so state survives restarts
+    await this.retryStore.save(this.toPersistedEntry(queuedTx));
+
     this.logger.log(
       `[${context.operation}] Transaction enqueued: ${id} (priority: ${priority}, queue size: ${this.queue.size})`,
     );
@@ -134,6 +152,7 @@ export class StellarTransactionQueueService implements OnModuleInit {
   dequeue(id: string): boolean {
     const removed = this.queue.delete(id);
     if (removed) {
+      this.retryStore.remove(id).catch(() => {});
       this.logger.log(`Transaction dequeued: ${id}`);
     }
     return removed;
@@ -185,6 +204,7 @@ export class StellarTransactionQueueService implements OnModuleInit {
 
       if (shouldRemove) {
         this.queue.delete(id);
+        this.retryStore.remove(id).catch(() => {});
       }
     }
 
@@ -267,6 +287,7 @@ export class StellarTransactionQueueService implements OnModuleInit {
     const age = Date.now() - queuedTx.createdAt.getTime();
     if (age > this.transactionTTLMs) {
       queuedTx.status = TransactionStatus.EXPIRED;
+      await this.retryStore.save(this.toPersistedEntry(queuedTx));
       this.logger.warn(`[${context.operation}] Transaction ${id} expired (age: ${age}ms)`);
       return;
     }
@@ -311,6 +332,9 @@ export class StellarTransactionQueueService implements OnModuleInit {
         `[${context.operation}] Transaction ${id} retry failed: ${err.message}. Next retry at ${queuedTx.nextRetryAt.toISOString()}`,
       );
     }
+
+    // Persist updated state
+    await this.retryStore.save(this.toPersistedEntry(queuedTx));
   }
 
   /**
@@ -330,6 +354,26 @@ export class StellarTransactionQueueService implements OnModuleInit {
     const hash = transaction.hash().toString('hex');
     const timestamp = Date.now();
     return `${hash.substring(0, 16)}-${timestamp}`;
+  }
+
+  /**
+   * Map an in-memory QueuedTransaction to the serializable shape used by the store
+   */
+  private toPersistedEntry(tx: QueuedTransaction) {
+    return {
+      id: tx.id,
+      xdr: tx.transaction.toXDR(),
+      context: tx.context,
+      sourcePublicKey: tx.sourcePublicKey,
+      attempts: tx.attempts,
+      maxAttempts: tx.maxAttempts,
+      nextRetryAt: tx.nextRetryAt.toISOString(),
+      createdAt: tx.createdAt.toISOString(),
+      lastAttemptAt: tx.lastAttemptAt?.toISOString(),
+      lastError: tx.lastError,
+      priority: tx.priority,
+      status: tx.status,
+    };
   }
 
   /**
